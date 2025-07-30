@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Ak’Air Agent</title>
+  <style>
+    body { font-family: sans-serif; background: #f0fdf7; margin: 0; text-align: center; color: #333; }
+    header { background: #007c5f; color: white; padding: 1rem; }
+    #aqiBox, #predictionBox, #healthAdviceBox {
+      background: white; margin: 1rem auto; padding: 1rem;
+      border-radius: 10px; width: 90%; max-width: 500px;
+      box-shadow: 0 3px 6px rgba(0,0,0,0.1);
+    }
+    svg#gauge { width: 150px; height: 150px; margin: 0 auto; display: block; }
+    canvas { width: 90%; max-width: 500px; margin: 1rem auto; }
+    input, button {
+      padding: 8px; margin: 5px; border-radius: 5px;
+    }
+    button { background: #007c5f; color: white; border: none; cursor: pointer; }
+    button:hover { background: #005c3c; }
+    footer { padding: 1rem; background: #eaeaea; margin-top: 2rem; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+<header><h1>Ak’Air Agent</h1><p>Kigali Air Quality & Prediction</p></header>
+
+<div id="aqiBox">
+  <div id="aqiVal">–</div>
+  <div id="aqiStatus">Loading...</div>
+  <svg id="gauge"></svg>
+  <button onclick="loadData()">Refresh</button>
+</div>
+
+<div id="healthAdviceBox">
+  <h3>Health Advice</h3>
+  <p id="healthAdviceText">Advice based on pollutant levels will appear here.</p>
+</div>
+
+<canvas id="chart"></canvas>
+
+<div id="predictionBox">
+  <h2>Next‑24h Prediction</h2>
+  <div id="predAQI">–</div>
+  <div id="predStatus">Enter inputs</div>
+  <button onclick="predict()">Predict</button>
+</div>
+
+<footer>© 2025 Ak’Air Agent.</footer>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+<script>
+const token = "4b1c270bf778518d5401e3d42c6840faf846fa17";
+let history = [];
+
+async function loadData() {
+  try {
+    const resp = await fetch(`https://api.waqi.info/feed/@13853/?token=${token}`);
+    const js = await resp.json();
+    if (js.status !== "ok") throw "API Error";
+    const d = js.data, aqi = d.aqi, dompol = d.dominentpol.toLowerCase();
+    document.getElementById("aqiVal").textContent = `AQI ${aqi}`;
+    const color = aqi <= 50 ? "green" : aqi <= 100 ? "orange" : "red";
+    document.getElementById("aqiVal").style.color = color;
+    document.getElementById("aqiStatus").textContent = `Dominant: ${dompol.toUpperCase()}`;
+    drawGauge(aqi, color);
+    addHistory(aqi);
+    drawChart();
+
+    const adviceMap = {
+      pm25: "Fine particles detected. Limit outdoor activity, especially for sensitive groups.",
+      pm10: "Dust levels are high. Stay indoors if possible and avoid exercise near roads.",
+      o3: "Ozone is elevated. Avoid intense outdoor activity, especially in the afternoon.",
+      no2: "Traffic emissions present. Avoid congested areas and reduce prolonged outdoor exposure.",
+      co: "Carbon monoxide risk. Ventilate indoor spaces and avoid running engines in enclosed areas.",
+      so2: "Sulfur dioxide alert. Those with asthma or respiratory conditions should stay indoors."
+    };
+    document.getElementById("healthAdviceText").textContent = adviceMap[dompol] || "Stay alert to local air conditions.";
+  } catch {
+    document.getElementById("aqiStatus").textContent = "Failed to load AQI.";
+  }
+}
+
+function drawGauge(val, color) {
+  const svg = document.getElementById("gauge"); svg.innerHTML = "";
+  const ns = "http://www.w3.org/2000/svg";
+  const base = document.createElementNS(ns, "circle");
+  base.setAttribute("cx", 75); base.setAttribute("cy", 75); base.setAttribute("r", 70);
+  base.setAttribute("stroke", "#eee"); base.setAttribute("stroke-width", 15); base.setAttribute("fill", "none");
+  svg.appendChild(base);
+  const arc = document.createElementNS(ns, "circle");
+  const pct = Math.min(val, 300) / 300;
+  arc.setAttribute("cx", 75); arc.setAttribute("cy", 75); arc.setAttribute("r", 70);
+  arc.setAttribute("stroke", color); arc.setAttribute("stroke-width", 15); arc.setAttribute("fill", "none");
+  arc.setAttribute("stroke-dasharray", 2 * Math.PI * 70 * pct + " " + 2 * Math.PI * 70);
+  arc.setAttribute("transform", "rotate(-90 75 75)");
+  svg.appendChild(arc);
+}
+
+function addHistory(aqi) {
+  const now = new Date().toLocaleTimeString();
+  history.push({ time: now, aqi });
+  if (history.length > 12) history.shift();
+}
+
+let chart = new Chart(document.getElementById('chart'), {
+  type: 'line',
+  data: {
+    labels: [],
+    datasets: [{
+      label: 'AQI (past hours)',
+      data: [],
+      borderColor: 'blue',
+      fill: false
+    }]
+  },
+  options: {
+    responsive: true,
+    scales: { y: { beginAtZero: true } }
+  }
+});
+
+function drawChart() {
+  chart.data.labels = history.map(h => h.time);
+  chart.data.datasets[0].data = history.map(h => h.aqi);
+  chart.update();
+}
+
+function buildModel() {
+  const m = tf.sequential();
+  m.add(tf.layers.dense({ units: 8, inputShape: [3], activation: 'relu' }));
+  m.add(tf.layers.dense({ units: 1 }));
+  m.compile({ optimizer: 'rmsprop', loss: 'meanSquaredError' });
+  return m;
+}
+const model = buildModel();
+
+function predict() {
+  const last = history[history.length - 1]?.aqi || NaN;
+  if (isNaN(last)) return alert("Load AQI data first.");
+  const temp = last / 5, hum = last / 10, wind = last / 20;
+  const out = model.predict(tf.tensor2d([[temp, hum, wind]])).dataSync()[0];
+  const p = Math.max(0, Math.min(500, Math.round(out + last * 0.5)));
+  document.getElementById('predAQI').textContent = p;
+  document.getElementById('predAQI').style.color = p <= 50 ? "green" : p <= 100 ? "orange" : "red";
+  document.getElementById('predStatus').textContent = p <= 50
+    ? "You're good 😊"
+    : p <= 100
+    ? "Sensitive groups be cautious."
+    : "Avoid exposure. Stay indoors.";
+}
+
+loadData();
+setInterval(loadData, 3600000);
+</script>
+</body>
+</html>
