@@ -1,9 +1,9 @@
-<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Ak’Air Agent</title>
+  <title>Ak’Air Agent - Rwanda</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css" />
   <style>
     body { font-family: sans-serif; background: #f0fdf7; margin: 0; text-align: center; color: #333; }
     header { background: #007c5f; color: white; padding: 1rem; }
@@ -14,23 +14,55 @@
     }
     svg#gauge { width: 150px; height: 150px; margin: 0 auto; display: block; }
     canvas { width: 90%; max-width: 500px; margin: 1rem auto; }
-    input, button {
+    input, button, select {
       padding: 8px; margin: 5px; border-radius: 5px;
     }
     button { background: #007c5f; color: white; border: none; cursor: pointer; }
     button:hover { background: #005c3c; }
     footer { padding: 1rem; background: #eaeaea; margin-top: 2rem; font-size: 0.9rem; }
+    #map { height: 500px; width: 100%; margin: 1rem 0; }
+
+    body.dark-mode {
+      background: #121212; color: #e0e0e0;
+    }
+    body.dark-mode header, body.dark-mode footer {
+      background: #1e1e1e;
+    }
+    body.dark-mode #aqiBox,
+    body.dark-mode #predictionBox,
+    body.dark-mode #healthAdviceBox {
+      background: #1e1e1e; color: #e0e0e0;
+      box-shadow: 0 3px 6px rgba(255,255,255,0.1);
+    }
+    body.dark-mode button { background: #333; }
+    body.dark-mode button:hover { background: #555; }
   </style>
 </head>
 <body>
-<header><h1>Ak’Air Agent</h1><p>Kigali Air Quality & Prediction</p></header>
+<header>
+<label style="position:absolute; top:1rem; right:1rem;">
+  <input type="checkbox" id="darkModeToggle" onchange="toggleDarkMode()" />
+  Dark Mode
+</label>
+  <h1>Ak’Air Agent</h1>
+  <p>Rwanda Air Quality & Prediction</p>
+</header>
 
 <div id="aqiBox">
+  <select id="citySelector" onchange="loadData()">
+    <option value="@13853">Kigali</option>
+    <option value="@11483">Huye</option>
+    <option value="@11239">Musanze</option>
+    <option value="@11229">Rubavu</option>
+    <option value="@11632">Nyagatare</option>
+  </select>
   <div id="aqiVal">–</div>
   <div id="aqiStatus">Loading...</div>
   <svg id="gauge"></svg>
   <button onclick="loadData()">Refresh</button>
 </div>
+
+<div id="map"></div>
 
 <div id="healthAdviceBox">
   <h3>Health Advice</h3>
@@ -50,13 +82,56 @@
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs"></script>
+<script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
 <script>
+function toggleDarkMode() {
+  const dark = document.body.classList.toggle("dark-mode");
+  localStorage.setItem("darkMode", dark);
+}
+if (localStorage.getItem("darkMode") === "true") {
+  document.body.classList.add("dark-mode");
+}
+
 const token = "4b1c270bf778518d5401e3d42c6840faf846fa17";
 let history = [];
+let city = localStorage.getItem("selectedCity") || "@13853";
+document.getElementById("citySelector").value = city;
+
+async function loadGeoJSON(url, style, popupText) {
+  try {
+    const res = await fetch(url);
+    const geojson = await res.json();
+    L.geoJSON(geojson, {
+      style,
+      onEachFeature: (f, l) => { if (popupText) l.bindPopup(popupText); }
+    }).addTo(map);
+  } catch (e) { console.warn("GeoJSON load failed", e); }
+}
+
+const map = L.map('map').setView([-1.95, 30.06], 12);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap contributors'
+}).addTo(map);
+
+// Add layers
+loadGeoJSON('https://raw.githubusercontent.com/akair-agent/data/main/kigali_trees.geojson', {
+  color: 'green', fillOpacity: 0.3
+}, '🌳 Tree Cover');
+loadGeoJSON('https://raw.githubusercontent.com/akair-agent/data/main/kigali_water.geojson', {
+  color: 'blue', fillOpacity: 0.4
+}, '💧 Water Body');
+loadGeoJSON('https://raw.githubusercontent.com/akair-agent/data/main/kigali_buildings.geojson', {
+  color: '#888', weight: 1, fillOpacity: 0.5
+}, '🏠 Housing Area');
+loadGeoJSON('https://raw.githubusercontent.com/akair-agent/data/main/kigali_traffic.geojson', {
+  color: 'red', fillOpacity: 0.5
+}, '🚦 High Traffic Zone');
 
 async function loadData() {
+  city = document.getElementById("citySelector").value;
+  localStorage.setItem("selectedCity", city);
   try {
-    const resp = await fetch(`https://api.waqi.info/feed/@13853/?token=${token}`);
+    const resp = await fetch(`https://api.waqi.info/feed/${city}/?token=${token}`);
     const js = await resp.json();
     if (js.status !== "ok") throw "API Error";
     const d = js.data, aqi = d.aqi, dompol = d.dominentpol.toLowerCase();
@@ -65,9 +140,10 @@ async function loadData() {
     document.getElementById("aqiVal").style.color = color;
     document.getElementById("aqiStatus").textContent = `Dominant: ${dompol.toUpperCase()}`;
     drawGauge(aqi, color);
+    history = loadHistory(city);
     addHistory(aqi);
+    saveHistory(city, history);
     drawChart();
-
     const adviceMap = {
       pm25: "Fine particles detected. Limit outdoor activity, especially for sensitive groups.",
       pm10: "Dust levels are high. Stay indoors if possible and avoid exercise near roads.",
@@ -82,6 +158,13 @@ async function loadData() {
   }
 }
 
+function saveHistory(cityKey, hist) {
+  localStorage.setItem("aqiHistory_" + cityKey, JSON.stringify(hist));
+}
+function loadHistory(cityKey) {
+  const raw = localStorage.getItem("aqiHistory_" + cityKey);
+  return raw ? JSON.parse(raw) : [];
+}
 function drawGauge(val, color) {
   const svg = document.getElementById("gauge"); svg.innerHTML = "";
   const ns = "http://www.w3.org/2000/svg";
@@ -97,36 +180,20 @@ function drawGauge(val, color) {
   arc.setAttribute("transform", "rotate(-90 75 75)");
   svg.appendChild(arc);
 }
-
 function addHistory(aqi) {
   const now = new Date().toLocaleTimeString();
   history.push({ time: now, aqi });
-  if (history.length > 12) history.shift();
+  if (history.length > 24) history.shift();
 }
-
 let chart = new Chart(document.getElementById('chart'), {
-  type: 'line',
-  data: {
-    labels: [],
-    datasets: [{
-      label: 'AQI (past hours)',
-      data: [],
-      borderColor: 'blue',
-      fill: false
-    }]
-  },
-  options: {
-    responsive: true,
-    scales: { y: { beginAtZero: true } }
-  }
+  type: 'line', data: { labels: [], datasets: [{ label: 'AQI (past hours)', data: [], borderColor: 'blue', fill: false }] },
+  options: { responsive: true, scales: { y: { beginAtZero: true } } }
 });
-
 function drawChart() {
   chart.data.labels = history.map(h => h.time);
   chart.data.datasets[0].data = history.map(h => h.aqi);
   chart.update();
 }
-
 function buildModel() {
   const m = tf.sequential();
   m.add(tf.layers.dense({ units: 8, inputShape: [3], activation: 'relu' }));
@@ -135,7 +202,6 @@ function buildModel() {
   return m;
 }
 const model = buildModel();
-
 function predict() {
   const last = history[history.length - 1]?.aqi || NaN;
   if (isNaN(last)) return alert("Load AQI data first.");
@@ -144,13 +210,8 @@ function predict() {
   const p = Math.max(0, Math.min(500, Math.round(out + last * 0.5)));
   document.getElementById('predAQI').textContent = p;
   document.getElementById('predAQI').style.color = p <= 50 ? "green" : p <= 100 ? "orange" : "red";
-  document.getElementById('predStatus').textContent = p <= 50
-    ? "You're good 😊"
-    : p <= 100
-    ? "Sensitive groups be cautious."
-    : "Avoid exposure. Stay indoors.";
+  document.getElementById('predStatus').textContent = p <= 50 ? "You're good 😊" : p <= 100 ? "Sensitive groups be cautious." : "Avoid exposure. Stay indoors.";
 }
-
 loadData();
 setInterval(loadData, 3600000);
 </script>
